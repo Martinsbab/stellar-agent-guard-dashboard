@@ -1,9 +1,9 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import type { ReadResult } from "../lib/guard/chain.ts";
 import { ENFORCEMENT_SCOPE_STATEMENT } from "../lib/guard/network.ts";
 import { lookupLabel, subscribeAddressBook } from "../lib/guard/addressBook.ts";
@@ -13,17 +13,40 @@ import {
   type FormatStroopsOptions,
 } from "../lib/guard/formatters.ts";
 
+/**
+ * The nav tabs (Console / Fleet / Configure).
+ *
+ * Switching tabs carries the shared-view query — `guard`, `network`, `filter`,
+ * and anything else the address bar holds — into the next view, minus `tab`
+ * (the path already names that). Without that carry-over a link an operator was
+ * handed would go dead the moment they looked at another tab.
+ */
 export function Tabs() {
   const pathname = usePathname();
+  const router = useRouter();
   const tabs = [
     { href: "/", label: "Console" },
     { href: "/fleet", label: "Fleet" },
     { href: "/configure", label: "Configure" },
   ];
+  const carryState = (href: string) => (event: MouseEvent<HTMLAnchorElement>) => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("tab");
+    const query = params.toString();
+    // Nothing to carry (or only `tab`): let the plain link take its course.
+    if (query === "") return;
+    event.preventDefault();
+    router.push(`${href}?${query}`);
+  };
   return (
     <nav className="tabs">
       {tabs.map((tab) => (
-        <Link key={tab.href} href={tab.href} aria-current={pathname === tab.href ? "page" : undefined}>
+        <Link
+          key={tab.href}
+          href={tab.href}
+          onClick={carryState(tab.href)}
+          aria-current={pathname === tab.href ? "page" : undefined}
+        >
           {tab.label}
         </Link>
       ))}

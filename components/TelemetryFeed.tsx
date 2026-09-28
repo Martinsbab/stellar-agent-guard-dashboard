@@ -1,9 +1,44 @@
 "use client";
 
+import { useMemo } from "react";
 import { describeGuardEvent, explainReason } from "stellar-agent-guard-sdk";
 import type { GuardEvent } from "stellar-agent-guard-sdk";
 import { useGuard } from "./GuardProvider.tsx";
 import { ErrorBlock, relativeTime, short, starLink } from "./bits.tsx";
+import {
+  DEFAULT_FILTER,
+  URL_FILTERS,
+  type FilterPreset,
+} from "../lib/guard/urlState.ts";
+
+/** The operator-facing label for each filter preset. */
+const FILTER_LABELS: Record<FilterPreset, string> = {
+  all: "All",
+  allowed: "Allowed",
+  blocked: "Blocked",
+  diagnostic: "Diagnostics",
+};
+
+/**
+ * Whether an event belongs under a preset.
+ *
+ * The decision presets filter on what the guard decided (`decision.result`);
+ * the diagnostic preset filters on where the row came from — this console's own
+ * refused-write diagnostics (`source`). Lifecycle rows (heartbeats, freezes,
+ * policy installs) carry no decision, so they appear under "all" only.
+ */
+function matchesPreset(event: GuardEvent, preset: FilterPreset): boolean {
+  switch (preset) {
+    case "all":
+      return true;
+    case "allowed":
+      return event.decision?.result === "allowed";
+    case "blocked":
+      return event.decision?.result === "blocked";
+    case "diagnostic":
+      return event.source === "diagnostic";
+  }
+}
 
 /**
  * The live event feed.
@@ -20,7 +55,16 @@ import { ErrorBlock, relativeTime, short, starLink } from "./bits.tsx";
  *     mean absence of refusals on chain.
  */
 export function TelemetryFeed() {
-  const { events, feed, startWatching, stopWatching, clearEvents, guard } = useGuard();
+  const { events, feed, startWatching, stopWatching, clearEvents, guard, filterPreset, setFilterPreset } =
+    useGuard();
+
+  // The preset is part of the shared URL state (see `lib/guard/urlState.ts`),
+  // so re-rendering here on a preset change is what a shared `?filter=blocked`
+  // link restores into.
+  const visibleEvents = useMemo(
+    () => events.filter((event) => matchesPreset(event, filterPreset)),
+    [events, filterPreset],
+  );
 
   return (
     <div className="panel">
@@ -40,6 +84,26 @@ export function TelemetryFeed() {
             Clear
           </button>
         </div>
+      </div>
+
+      <div className="row" role="group" aria-label="Filter events" style={{ marginTop: 8 }}>
+        <span className="tiny muted">Filter</span>
+        {URL_FILTERS.map((preset) => (
+          <button
+            key={preset}
+            type="button"
+            className={preset === filterPreset ? undefined : "secondary"}
+            aria-pressed={preset === filterPreset}
+            onClick={() => setFilterPreset(preset)}
+          >
+            {FILTER_LABELS[preset]}
+          </button>
+        ))}
+        {filterPreset !== DEFAULT_FILTER && (
+          <span className="tiny muted">
+            {visibleEvents.length} of {events.length} event(s)
+          </span>
+        )}
       </div>
 
       <p className="tiny muted" style={{ marginTop: 8 }}>
@@ -68,6 +132,11 @@ export function TelemetryFeed() {
             ? "No events from this guard yet. Lifecycle events (policy set, frozen, heartbeat) and allowed decisions appear here as they settle."
             : "Start watching to tail this guard's events."}
         </p>
+      ) : visibleEvents.length === 0 ? (
+        <p className="tiny muted">
+          No buffered event matches the current filter. Choose &quot;All&quot; above to see the
+          whole feed.
+        </p>
       ) : (
         <div className="scrolly">
           <table className="events">
@@ -81,7 +150,7 @@ export function TelemetryFeed() {
               </tr>
             </thead>
             <tbody>
-              {events.map((event, index) => (
+              {visibleEvents.map((event, index) => (
                 <tr key={`${event.topic}-${event.transactionHash ?? "-"}-${event.ledger ?? "-"}-${index}`}>
                   <td>
                     <div>{labelFor(event)}</div>
@@ -116,7 +185,7 @@ export function TelemetryFeed() {
       )}
 
       <p className="tiny muted" style={{ marginTop: 8 }}>
-        Feed holds the most recent {events.length} event(s) from{" "}
+        Showing {visibleEvents.length} of {events.length} buffered event(s) from{" "}
         <span className="mono">{short(guard, 8, 6)}</span>.
       </p>
     </div>

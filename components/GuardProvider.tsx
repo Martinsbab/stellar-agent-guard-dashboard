@@ -25,11 +25,21 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useRouter } from "next/navigation";
 import type { rpc } from "@stellar/stellar-sdk";
 import type { GuardEvent } from "stellar-agent-guard-sdk";
 import { createServer } from "../lib/guard/chain.ts";
 import { readGuardSnapshot, type GuardSnapshot } from "../lib/guard/guardOps.ts";
 import { NETWORK } from "../lib/guard/network.ts";
+import {
+  DEFAULT_FILTER,
+  TAB_PATHNAMES,
+  decodeUrlState,
+  writeUrlState,
+  type FilterPreset,
+  type UrlState,
+  type UrlTab,
+} from "../lib/guard/urlState.ts";
 import { GuardFeed } from "../lib/guard/telemetry.ts";
 import { createTabSync, type TabSyncEventType } from "../lib/guard/tabSync.ts";
 import {
@@ -90,6 +100,12 @@ interface GuardContextValue {
   /** Surface refused-write diagnostics in the feed, labelled as diagnostics. */
   pushEvents: (events: GuardEvent[]) => void;
   /**
+   * The telemetry feed's filter preset, decoded from (and mirrored back into)
+   * the URL so a shared link reopens the same filtered view.
+   */
+  filterPreset: FilterPreset;
+  setFilterPreset: (preset: FilterPreset) => void;
+  /**
    * Tell the other open tabs that this one changed something. The provider adds
    * the active guard, so callers only name the change.
    */
@@ -120,6 +136,7 @@ function eventKey(event: GuardEvent): string {
 
 export function GuardProvider({ children }: { children: ReactNode }) {
   const server = useMemo(() => createServer(NETWORK.rpcUrl), []);
+  const router = useRouter();
   // The cross-tab coordinator. It is transport-agnostic (BroadcastChannel with a
   // localStorage fallback) and inert where neither exists, so the provider never
   // branches on availability. Created once per tab.
@@ -134,13 +151,26 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   const [instances, setInstances] = useState<GuardInstance[]>(() =>
     isDemoMode() ? [DEMO_INSTANCE] : [...KNOWN_INSTANCES],
   );
-  const [guard, setGuard] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      const g = new URLSearchParams(window.location.search).get("guard");
-      if (g) return g;
-    }
-    return isDemoMode() ? DEMO_GUARD : KNOWN_INSTANCES[0]!.guard;
-  });
+  // The shared-view state this link arrived with, decoded once and validated:
+  // a malformed address or injection-style value is simply absent from the
+  // result, so the console falls back to its default guard instead of trying
+  // to read a state the URL invented.
+  const initialUrlState = useMemo<UrlState>(
+    () => (typeof window === "undefined" ? {} : decodeUrlState(window.location.search)),
+    [],
+  );
+  const [guard, setGuard] = useState<string>(
+    () =>
+      initialUrlState.guard ??
+      (isDemoMode() ? DEMO_GUARD : KNOWN_INSTANCES[0]!.guard),
+  );
+  const [filterPreset, setFilterPreset] = useState<FilterPreset>(
+    () => initialUrlState.filter ?? DEFAULT_FILTER,
+  );
+  // A tab a shared link named is kept for the life of this view — not
+  // re-derived — so it survives the URL synchronisation below even when it
+  // names a console section (`?tab=telemetry`) rather than a route.
+  const [sharedTab] = useState<UrlTab | undefined>(() => initialUrlState.tab);
   const [snapshot, setSnapshot] = useState<GuardSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -186,6 +216,34 @@ export function GuardProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (demoFlagFromQuery(window.location.search)) setDemo(true);
   }, []);
+
+  // A shared link can name the tab it wants open. Route-backed tabs are
+  // restored by navigating to the view the tab names — client-side, so the
+  // rest of the shared state (guard, network, filter) travels in the query
+  // instead of being lost. A tab that names a console section has no route,
+  // so it stays put and is preserved by the synchronisation below.
+  useEffect(() => {
+    if (sharedTab === undefined) return;
+    const target = TAB_PATHNAMES[sharedTab];
+    if (target === null || target === window.location.pathname) return;
+    const params = new URLSearchParams(window.location.search);
+    params.delete("tab");
+    const query = params.toString();
+    router.replace(query ? `${target}?${query}` : target);
+  }, [sharedTab, router]);
+
+  // Mirror the shareable state into the address bar. `writeUrlState` rewrites
+  // the current history entry in place — no reload, no history entry — and
+  // writes nothing when the URL already says the same thing, so this is safe
+  // to run on every change and keeps the URL clean of invalid leftovers.
+  useEffect(() => {
+    writeUrlState({
+      guard,
+      network: NETWORK.name,
+      ...(sharedTab === undefined ? {} : { tab: sharedTab }),
+      ...(filterPreset === DEFAULT_FILTER ? {} : { filter: filterPreset }),
+    });
+  }, [guard, filterPreset, sharedTab]);
 
   // In demo mode the feed is seeded and watching immediately: a visitor should
   // see realistic telemetry without having to click "Start watching" first. The
@@ -481,6 +539,8 @@ export function GuardProvider({ children }: { children: ReactNode }) {
     stopWatching,
     clearEvents,
     pushEvents,
+    filterPreset,
+    setFilterPreset,
     notifyTabs,
     session: {
       state: idleState,
